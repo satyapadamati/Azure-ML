@@ -1,0 +1,72 @@
+name: Continuous Deployment Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: fraud-detection-repo
+  MODEL_NAME: fraud-detection-model
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build, tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+
+    - name: Train model
+      run: |
+        aws sagemaker create-training-job \
+          --training-job-name fraud-detection-${{ github.sha }} \
+          --algorithm-specification TrainingImage=$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} TrainingInputMode=File \
+          --role-arn ${{ secrets.SAGEMAKER_ROLE_ARN }} \
+          --input-data-config '{"ChannelName": "training", "DataSource": {"S3DataSource": {"S3Uri": "s3://${{ secrets.S3_BUCKET }}/fraud_data.csv", "S3DataType": "S3Prefix"}}}' \
+          --output-data-config S3OutputPath=s3://${{ secrets.S3_BUCKET }}/model-output \
+          --resource-config InstanceType=ml.m5.large,InstanceCount=1,VolumeSizeInGB=5 \
+          --stopping-condition MaxRuntimeInSeconds=3600
+
+    - name: Deploy model
+      run: |
+        aws sagemaker create-model \
+          --model-name $MODEL_NAME-${{ github.sha }} \
+          --primary-container '{"Image": "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}", "ModelDataUrl": "s3://${{ secrets.S3_BUCKET }}/model-output/fraud-detection-${{ github.sha }}/output/model.tar.gz"}' \
+          --execution-role-arn ${{ secrets.SAGEMAKER_ROLE_ARN }}
+
+        aws sagemaker create-endpoint-config \
+          --endpoint-config-name $MODEL_NAME-config-${{ github.sha }} \
+          --production-variants '{"VariantName": "AllTraffic", "ModelName": "$MODEL_NAME-${{ github.sha }}", "InitialInstanceCount": 1, "InstanceType": "ml.t2.medium"}'
+
+        aws sagemaker create-endpoint \
+          --endpoint-name $MODEL_NAME-endpoint \
+          --endpoint-config-name $MODEL_NAME-config-${{ github.sha }}
+
+    - name: Test Deployment
+      run: |
+        endpoint_name=$MODEL_NAME-endpoint
+        aws sagemaker-runtime invoke-endpoint \
+          --endpoint-name $endpoint_name \
+          --body '[[1,2,3,4,5]]' \
+          --content-type 'application/json' \
+          output.json
+
+        cat output.json
