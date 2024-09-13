@@ -34,50 +34,17 @@ jobs:
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
 
-        - name: Train model
+    - name: Train model
       run: |
-        training_job_name="fraud-detection-${{ github.sha }}"
-        echo "Starting training job: $training_job_name"
-        
         aws sagemaker create-training-job \
-          --training-job-name "$training_job_name" \
-          --algorithm-specification '{
-            "TrainingImage": "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}",
-            "TrainingInputMode": "File"
-          }' \
-          --role-arn "${{ secrets.SAGEMAKER_ROLE_ARN }}" \
-          --input-data-config '[{
-            "ChannelName": "training",
-            "DataSource": {
-              "S3DataSource": {
-                "S3Uri": "s3://${{ secrets.S3_BUCKET }}/fraud_data.csv",
-                "S3DataType": "S3Prefix"
-              }
-            }
-          }]' \
-          --output-data-config '{
-            "S3OutputPath": "s3://${{ secrets.S3_BUCKET }}/model-output"
-          }' \
-          --resource-config '{
-            "InstanceType": "ml.m5.large",
-            "InstanceCount": 1,
-            "VolumeSizeInGB": 5
-          }' \
-          --stopping-condition '{
-            "MaxRuntimeInSeconds": 3600
-          }'
-        
-        echo "Waiting for training job to complete..."
-        aws sagemaker wait training-job-completed-or-stopped --training-job-name "$training_job_name"
-        
-        training_status=$(aws sagemaker describe-training-job --training-job-name "$training_job_name" --query 'TrainingJobStatus' --output text)
-        echo "Training job status: $training_status"
-        
-        if [ "$training_status" != "Completed" ]; then
-          echo "Training job failed or stopped unexpectedly"
-          aws sagemaker describe-training-job --training-job-name "$training_job_name"
-          exit 1
-        fi
+          --training-job-name fraud-detection-${{ github.sha }} \
+          --algorithm-specification TrainingImage=$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} TrainingInputMode=File \
+          --role-arn ${{ secrets.SAGEMAKER_ROLE_ARN }} \
+          --input-data-config '{"ChannelName": "training", "DataSource": {"S3DataSource": {"S3Uri": "s3://${{ secrets.S3_BUCKET }}/fraud_data.csv", "S3DataType": "S3Prefix"}}}' \
+          --output-data-config S3OutputPath=s3://${{ secrets.S3_BUCKET }}/model-output \
+          --resource-config InstanceType=ml.m5.large,InstanceCount=1,VolumeSizeInGB=5 \
+          --stopping-condition MaxRuntimeInSeconds=3600
+
     - name: Deploy model
       run: |
         aws sagemaker create-model \
